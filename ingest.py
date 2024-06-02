@@ -7,8 +7,7 @@ import openai
 import qianfan
 from langchain.docstore.document import Document
 from langchain_community.vectorstores import FAISS
-from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.embeddings import QianfanEmbeddingsEndpoint
+from langchain_community.embeddings import OpenAIEmbeddings, QianfanEmbeddingsEndpoint
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 
 from typing import List
@@ -79,7 +78,8 @@ def load_documents(source_dir: str) -> List[Document]:
 def ingest_documents(fileIdentifier: str, chunk_size: int = 1000, chunk_overlap: int = 200):
     SOURCE_DIRECTORY = os.path.join(BASE_SOURCE_DIRECTORY, fileIdentifier)
     PERSIST_DIRECTORY = os.path.join(FAISS_PERSIST_DIRECTORY, fileIdentifier)
-    PROGRESS_PATH = os.path.join(PERSIST_DIRECTORY, "progress.json")
+    PROGRESS_PATH = os.path.join(PERSIST_DIRECTORY, "progress.jsonl")
+    SPLITED_TEXTS_PATH = os.path.join(PERSIST_DIRECTORY, "splited_texts.jsonl")
 
     try:
         # Check if the SOURCE_DIRECTORY exists and is not empty
@@ -100,37 +100,43 @@ def ingest_documents(fileIdentifier: str, chunk_size: int = 1000, chunk_overlap:
             # If the persistent directory does not exist, create it
             os.makedirs(PERSIST_DIRECTORY)
 
-        # Retrieve the list of document names from the source directory
-        documents_name = os.listdir(SOURCE_DIRECTORY)
-        print(f"Loaded {len(documents_name)} documents from {SOURCE_DIRECTORY}")
+        if os.path.exists(SPLITED_TEXTS_PATH):
+            print("Loading splited texts from file")
+            texts = load_splited_texts(SPLITED_TEXTS_PATH)
+        else:
+            # Retrieve the list of document names from the source directory
+            documents_name = os.listdir(SOURCE_DIRECTORY)
+            print(f"Loaded {len(documents_name)} documents from {SOURCE_DIRECTORY}")
 
-        # Load documents based on the names retrieved
-        documents = load_documents(SOURCE_DIRECTORY)[0]
+            # Load documents based on the names retrieved
+            documents = load_documents(SOURCE_DIRECTORY)[0]
 
-        # Calculate and print number of tokens per document
-        num_tokens = num_tokens_from_documents(documents)
-        for doc, num_token in zip(documents, num_tokens):
-            doc.metadata["num_tokens"] = num_token 
+            # Calculate and print number of tokens per document
+            num_tokens = num_tokens_from_documents(documents)
+            for doc, num_token in zip(documents, num_tokens):
+                doc.metadata["num_tokens"] = num_token 
 
-        short_documents = [doc for doc in documents if doc.metadata["num_tokens"] < 512]
-        documents = [doc for doc in documents if doc.metadata["num_tokens"] >= 512]
+            short_documents = [doc for doc in documents if doc.metadata["num_tokens"] < 512]
+            documents = [doc for doc in documents if doc.metadata["num_tokens"] >= 512]
 
-        print(f"Total number of tokens is {sum(num_tokens)}")
+            print(f"Total number of tokens is {sum(num_tokens)}")
 
-        # Initialize text splitter and split documents into chunks
-        text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
-        texts = text_splitter.split_documents(documents)
+            # Initialize text splitter and split documents into chunks
+            text_splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            texts = text_splitter.split_documents(documents)
 
-        # Calculate and print number of tokens per document
-        num_tokens = num_tokens_from_documents(texts)
-        for doc, num_token in zip(texts, num_tokens):
-            doc.metadata["num_tokens"] = num_token 
+            # Calculate and print number of tokens per document
+            num_tokens = num_tokens_from_documents(texts)
+            for doc, num_token in zip(texts, num_tokens):
+                doc.metadata["num_tokens"] = num_token 
 
-        texts = [doc for doc in texts if doc.metadata["num_tokens"] >= 30]
+            texts = [doc for doc in texts if doc.metadata["num_tokens"] >= 30]
+            texts.extend(short_documents)
 
-        texts.extend(short_documents)
+            save_splited_texts(texts, SPLITED_TEXTS_PATH)
+            print(f"Split {len(texts)} texts to file for future use")
 
-        print(f"Split into {len(texts)} chunks of text")
+        print(f"There are {len(texts)} chunks of text")
 
         # Use OpenAI embedding
         # embeddings = OpenAIEmbeddings(
@@ -224,9 +230,6 @@ def embedding_documents(documents: List[Document], embeddings: OpenAIEmbeddings,
             doc_info["embeddings"] = [0.0] * 1024  # 生成1024维的全零向量
             doc_info["metadata"]["embedding_success"] = False  # 标记embedding生成失败
 
-        # 计算tokens数量
-        doc_info["metadata"]["num_tokens"] = num_tokens_from_string(doc.page_content)
-
         # 添加到文档embeddings列表中
         doc_embeddings.append(doc_info)
         
@@ -253,15 +256,42 @@ def get_embedding_qianfan(query_list:List[str]) -> List[float]:
 
     return embedding["body"]["data"][0]["embedding"]
 
-def save_progress(embeddings_list, filepath):
-    with open(filepath, 'w', encoding='utf-8') as f:
-        json.dump(embeddings_list, f, ensure_ascii=False, indent=4)
+def save_progress(embedding_dict, filepath):
+    with open(filepath, 'a', encoding='utf-8') as f:
+        json.dump(embedding_dict, f, ensure_ascii=False)
+        f.write('\n')  # 写入换行符来分隔各条记录
 
 def load_progress(filepath):
+    embeddings_list = []
     if os.path.exists(filepath):
         with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    return []
+            for line in f:
+                embeddings_list.append(json.loads(line))
+    return embeddings_list
+
+def document_to_dict(document: Document) -> dict:
+    # 假设Document类具有page_content和metadata属性
+    return {
+        'page_content': document.page_content,
+        'metadata': document.metadata
+    }
+
+def dict_to_document(data: dict) -> Document:
+    # 重新创建Document对象，假设Document类可以这样初始化
+    return Document(page_content=data['page_content'], metadata=data['metadata'])
+
+def save_splited_texts(texts: List[Document], file_path: str):
+    with open(file_path, 'w', encoding='utf-8') as f:
+        for text in texts:
+            f.write(json.dumps(document_to_dict(text), ensure_ascii=False) + '\n')
+
+def load_splited_texts(file_path: str) -> List[Document]:
+    texts = []
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            text_dict = json.loads(line.strip())
+            texts.append(dict_to_document(text_dict))
+    return texts
 
 
 if __name__ == "__main__":
