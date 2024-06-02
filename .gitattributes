@@ -1,2 +1,1 @@
-faissdb/5000_csv/*.json filter=lfs diff=lfs merge=lfs -text
 faissdb/5000_csv/progress.json filter=lfs diff=lfs merge=lfs -text
