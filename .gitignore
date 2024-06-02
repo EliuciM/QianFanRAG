@@ -1,0 +1,8 @@
+# 忽略开发环境设置目录
+.vscode/
+
+# 忽略特定的文件
+Dockerfile
+requirements.txt
+smart_api_qianfan.py
+
